@@ -1090,6 +1090,40 @@ body.copy-mode .page-container img {
   box-shadow: none;
 }
 
+.material-dialog {
+  width: min(1100px, 94vw);
+  height: min(850px, 90vh);
+  max-width: 94vw;
+  max-height: 90vh;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--modal-bg);
+  color: var(--text);
+}
+
+.material-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.material-dialog::backdrop {
+  background: var(--overlay);
+}
+
+.material-dialog .modal-header {
+  flex: 0 0 auto;
+}
+
+.material-frame {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  background: white;
+}
+
 .modal-version {
   margin-top: 10px;
   text-align: right;
@@ -1419,6 +1453,13 @@ body:not(.sidebar-open) .sidebar {
     <div id="settings-version" class="modal-version" aria-label="Version">Version -</div>
   </div>
 
+  <dialog id="material-dialog" class="material-dialog" aria-labelledby="material-dialog-title">
+    <div class="modal-header">
+      <h2 id="material-dialog-title" class="modal-title">Material</h2>
+      <button id="material-close" class="modal-close" type="button" aria-label="Material schließen">×</button>
+    </div>
+  </dialog>
+
 <script>
 (() => {
   const REGEX = {
@@ -1454,6 +1495,9 @@ body:not(.sidebar-open) .sidebar {
     external: "external",
   };
   const state = {
+    materialFrame: null,
+    materialObjectUrl: "",
+    materialTrigger: null,
     book: null,
     search: null,
     searchBuildPromise: null,
@@ -1690,6 +1734,9 @@ body:not(.sidebar-open) .sidebar {
     els.folderButton = document.getElementById("folder-button");
     els.settingsButton = document.getElementById("toggle-settings");
     els.settingsButtonStart = document.getElementById("toggle-settings-start");
+    els.materialDialog = document.getElementById("material-dialog");
+    els.materialTitle = document.getElementById("material-dialog-title");
+    els.materialClose = document.getElementById("material-close");
     els.settingsDialog = document.getElementById("settings-dialog");
     els.settingsBackdrop = document.getElementById("settings-backdrop");
     els.settingsClose = document.getElementById("settings-close");
@@ -1698,6 +1745,16 @@ body:not(.sidebar-open) .sidebar {
   }
 
   function bindEvents() {
+    els.materialClose.addEventListener("click", closeMaterialDialog);
+    els.materialDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeMaterialDialog();
+    });
+    els.materialDialog.addEventListener("close", () => {
+      if (!els.materialDialog.open) {
+        releaseMaterialFrame();
+      }
+    });
     els.toggleSidebar.addEventListener("click", toggleSidebar);
     els.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
     if (els.bookTitle) {
@@ -1848,6 +1905,13 @@ body:not(.sidebar-open) .sidebar {
     });
 
     document.addEventListener("keydown", (event) => {
+      if (els.materialDialog.open) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeMaterialDialog();
+        }
+        return;
+      }
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
         return;
       }
@@ -2532,6 +2596,7 @@ body:not(.sidebar-open) .sidebar {
   }
 
   function returnToBookSelection() {
+    closeMaterialDialog();
     if (typeof state.pageTransitionCleanup === "function") {
       state.pageTransitionCleanup();
     }
@@ -3774,6 +3839,7 @@ function fitBookGridTitles() {
   }
 
   async function selectBook(book) {
+    closeMaterialDialog();
     clearPageSwipePreview();
     state.pageSwipe.active = false;
     state.pageSwipe.pointerId = null;
@@ -3931,6 +3997,7 @@ function fitBookGridTitles() {
   }
 
   function clearFileCache() {
+    closeMaterialDialog();
     if (typeof state.pageTransitionCleanup === "function") {
       state.pageTransitionCleanup();
     }
@@ -6381,18 +6448,99 @@ function fitBookGridTitles() {
     }
   }
 
+  function isSafeTextLength(value) {
+    if (!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:px|pt|em|rem|%)?$/.test(value)) {
+      return false;
+    }
+    return Math.abs(parseFloat(value)) <= 1000000;
+  }
+
+  function isSafeTextTransform(value) {
+    const transforms = value.match(/(?:matrix|translate(?:X|Y)?|scale(?:X|Y)?|rotate|skew(?:X|Y)?)\([^()]+\)/g);
+    if (!transforms || transforms.join("").replace(/\s/g, "") !== value.replace(/\s/g, "")) {
+      return false;
+    }
+    return transforms.every((transform) => {
+      const args = transform.slice(transform.indexOf("(") + 1, -1).split(/[,\s]+/).filter(Boolean);
+      return args.length > 0 && args.length <= 6 && args.every((arg) => {
+        const numeric = arg.replace(/(?:deg|rad|turn)$/, "");
+        return isSafeTextLength(numeric);
+      });
+    });
+  }
+
+  function copySafeTextStyle(source, target) {
+    const lengths = ["left", "top", "right", "bottom", "width", "height", "font-size", "line-height", "letter-spacing", "word-spacing"];
+    lengths.forEach((property) => {
+      const value = source.style.getPropertyValue(property).trim();
+      if (isSafeTextLength(value)) {
+        target.style.setProperty(property, value);
+      }
+    });
+    const keywords = {
+      position: ["absolute", "relative", "static"],
+      "font-style": ["normal", "italic", "oblique"],
+      "font-weight": ["normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900"],
+      "white-space": ["normal", "pre", "pre-wrap", "pre-line", "nowrap", "break-spaces"],
+      "text-align": ["left", "right", "center", "justify", "start", "end"],
+      direction: ["ltr", "rtl"],
+    };
+    Object.entries(keywords).forEach(([property, allowed]) => {
+      const value = source.style.getPropertyValue(property).trim();
+      if (allowed.includes(value)) {
+        target.style.setProperty(property, value);
+      }
+    });
+    const family = source.style.fontFamily;
+    if (family && /^[\p{L}\p{N}\s,'"_-]+$/u.test(family)) {
+      target.style.fontFamily = family;
+    }
+    if (isSafeTextTransform(source.style.transform)) {
+      target.style.transform = source.style.transform;
+    }
+    const origin = source.style.transformOrigin.trim().split(/\s+/);
+    if (origin.length <= 3 && origin.every((part) => isSafeTextLength(part) || ["left", "right", "top", "bottom", "center"].includes(part))) {
+      target.style.transformOrigin = origin.join(" ");
+    }
+  }
+
+  function buildSafeTextLayer(data) {
+    if (!data || typeof data.html !== "string" || ![data.width, data.height].every((value) => Number.isFinite(Number(value)) && Number(value) > 0)) {
+      return null;
+    }
+    const template = document.createElement("template");
+    template.innerHTML = data.html;
+    const source = template.content.querySelector(".textLayer");
+    if (!source || !["div", "span"].includes(source.localName) || source.namespaceURI !== "http://www.w3.org/1999/xhtml") {
+      return null;
+    }
+    const layer = document.createElement("div");
+    layer.className = "textLayer";
+    copySafeTextStyle(source, layer);
+    const pending = [[source, layer]];
+    while (pending.length) {
+      const [parent, output] = pending.pop();
+      for (const child of parent.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          output.appendChild(document.createTextNode(child.textContent));
+        } else if (child.nodeType === Node.ELEMENT_NODE && child.namespaceURI === "http://www.w3.org/1999/xhtml" && ["div", "span", "br"].includes(child.localName)) {
+          const clean = document.createElement(child.localName);
+          copySafeTextStyle(child, clean);
+          output.appendChild(clean);
+          pending.push([child, clean]);
+        }
+      }
+    }
+    return layer;
+  }
+
   async function hasTextLayer(page) {
     try {
       if (state.bookFormat === "structured") {
         return true;
       }
       const data = await loadPageData(page);
-      if (!data || !data.html) {
-        return false;
-      }
-      const wrapper = document.createElement("div");
-      wrapper.innerHTML = data.html;
-      const layer = wrapper.querySelector(".textLayer");
+      const layer = buildSafeTextLayer(data);
       if (!layer) {
         return false;
       }
@@ -6458,7 +6606,8 @@ function fitBookGridTitles() {
       return;
     }
     const data = await loadPageData(page).catch(() => null);
-    if (!data || !data.html || !data.width || !data.height) {
+    const textLayer = buildSafeTextLayer(data);
+    if (!textLayer) {
       removeTextOverlay(container);
       return;
     }
@@ -6483,13 +6632,6 @@ function fitBookGridTitles() {
     overlay.style.width = `${imgWidth}px`;
     overlay.style.height = `${imgHeight}px`;
 
-    const wrapper = document.createElement("div");
-    wrapper.innerHTML = data.html;
-    const textLayer = wrapper.querySelector(".textLayer");
-    if (!textLayer) {
-      removeTextOverlay(container);
-      return;
-    }
     textLayer.style.position = "absolute";
     textLayer.style.left = "0px";
     textLayer.style.top = "0px";
@@ -8028,7 +8170,7 @@ function fitBookGridTitles() {
     return hasFileAtPath(path, { allowMedia: true });
   }
 
-  function getMaterialUrl(entry) {
+  function resolveMaterialUrl(entry) {
     if (!entry) {
       return "";
     }
@@ -8103,6 +8245,130 @@ function fitBookGridTitles() {
       return appendPdfPageTarget(url || resolved, entry);
     }
     return "";
+  }
+
+  function getMaterialUrl(entry) {
+    if (!entry) {
+      return "";
+    }
+    for (const reference of [entry.url, entry.path, entry.file]) {
+      const raw = String(reference || "").trim();
+      if (/[\u0000-\u001f\u007f]/.test(raw)) {
+        return "";
+      }
+      if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^(?:https?:|file:)/i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) {
+        return "";
+      }
+    }
+    const resolved = resolveMaterialUrl(entry);
+    if (!resolved) {
+      return "";
+    }
+    try {
+      const url = new URL(resolved, window.location.href);
+      if (url.protocol === "blob:") {
+        const base = url.href.split("#")[0];
+        return Array.from(state.fileUrlCache.values()).includes(base) ? resolved : "";
+      }
+      if (["https:", "http:"].includes(url.protocol)) {
+        return resolved;
+      }
+      return url.protocol === "file:" && window.location.protocol === "file:" ? resolved : "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function getMaterialFile(entry, url) {
+    const blob = String(url).split("#")[0];
+    for (const [path, cached] of state.fileUrlCache) {
+      if (cached === blob) {
+        return getFileFromMap(path, { allowMedia: true }) || getFileFromEntries(path, { allowMedia: true });
+      }
+    }
+    const reference = entry.file ? `media/${entry.file}` : entry.path || entry.url;
+    if (!reference || /^(?:https?:)?\/\//i.test(reference)) {
+      return null;
+    }
+    const path = resolvePath(stripQueryAndHashFromPath(reference));
+    return getFileFromMap(path, { allowMedia: true }) || getFileFromEntries(path, { allowMedia: true });
+  }
+
+  function needsMaterialSandbox(entry, url) {
+    const file = getMaterialFile(entry, url);
+    const types = [file && file.type, entry.extension, entry.mimeType].map((value) => String(value || "").toLowerCase().split(";")[0].trim());
+    if (types.some((type) => ["text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml", "html", "htm", "xhtml", "svg", "xml"].includes(type))) {
+      return true;
+    }
+    const paths = [file && file.name, entry.file, entry.path, entry.url, url];
+    if (paths.some((path) => /\.(?:html?|xhtml|svg|xml)(?:[?#]|$)/i.test(String(path || "")))) {
+      return true;
+    }
+    const target = new URL(url, window.location.href);
+    const local = !!file || target.protocol === "blob:" || target.protocol === "file:" || target.origin === window.location.origin;
+    if (!local) {
+      return false;
+    }
+    const passiveType = file && /^(?:application\/(?:pdf|zip|x-zip-compressed|msword|vnd\.ms-excel|vnd\.ms-powerpoint|vnd\.openxmlformats-officedocument\.[a-z.-]+)|image\/(?:png|jpeg|gif|webp|avif|bmp)|audio\/[a-z0-9.+-]+|video\/[a-z0-9.+-]+|text\/plain)$/i.test(file.type);
+    const passivePath = /\.(?:pdf|png|jpe?g|gif|webp|avif|bmp|mp3|wav|ogg|mp4|webm|txt|docx?|xlsx?|pptx?|zip)(?:[?#]|$)/i.test(target.pathname);
+    return file ? !passiveType : !passivePath;
+  }
+
+  function releaseMaterialFrame() {
+    if (state.materialFrame) {
+      state.materialFrame.remove();
+      state.materialFrame = null;
+    }
+    if (state.materialObjectUrl) {
+      URL.revokeObjectURL(state.materialObjectUrl);
+      state.materialObjectUrl = "";
+    }
+  }
+
+  function closeMaterialDialog() {
+    releaseMaterialFrame();
+    if (els.materialDialog && els.materialDialog.open) {
+      els.materialDialog.close();
+    }
+    const trigger = state.materialTrigger;
+    state.materialTrigger = null;
+    if (trigger && trigger.isConnected) {
+      trigger.focus();
+    }
+  }
+
+  function openMaterial(entry) {
+    const url = getMaterialUrl(entry);
+    if (!url) {
+      return;
+    }
+    if (!needsMaterialSandbox(entry, url)) {
+      window.open(url, "_blank", "noopener");
+      return;
+    }
+    closeMaterialDialog();
+    state.materialTrigger = document.activeElement;
+    const title = String(entry.name || entry.label || "Material");
+    els.materialTitle.textContent = title;
+    const frame = document.createElement("iframe");
+    frame.className = "material-frame";
+    frame.title = title;
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.referrerPolicy = "no-referrer";
+    let source = url;
+    if (url.startsWith("blob:")) {
+      const file = getMaterialFile(entry, url);
+      if (!file) {
+        return;
+      }
+      state.materialObjectUrl = URL.createObjectURL(file);
+      source = state.materialObjectUrl + (new URL(url).hash || "");
+    }
+    frame.src = source;
+    state.materialFrame = frame;
+    els.materialDialog.appendChild(frame);
+    els.materialDialog.showModal();
+    els.materialClose.focus();
   }
 
   function shouldPreferDirectMaterialPath(path) {
@@ -8387,12 +8653,12 @@ function fitBookGridTitles() {
         hasAction = true;
         item.classList.add("clickable");
         item.addEventListener("click", () => {
-          window.open(url, "_blank", "noopener");
+          openMaterial(entry);
         });
         item.addEventListener("keydown", (event) => {
-          if (event.key === "Enter" || event.key === " ") {
+          if (event.target === item && (event.key === "Enter" || event.key === " ")) {
             event.preventDefault();
-            window.open(url, "_blank", "noopener");
+            openMaterial(entry);
           }
         });
         item.tabIndex = 0;
@@ -8438,13 +8704,24 @@ function fitBookGridTitles() {
       }
       seenLinks.add(linkKey);
       hasAction = true;
-      const link = document.createElement("a");
+      const isolated = needsMaterialSandbox(entry, url);
+      const link = document.createElement(isolated ? "button" : "a");
       link.className = "material-format";
-      link.href = url;
-      link.target = "_blank";
-      link.rel = "noopener";
+      if (isolated) {
+        link.type = "button";
+      } else {
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener";
+      }
       link.textContent = getMaterialExtension(entry);
-      link.addEventListener("click", (event) => event.stopPropagation());
+      link.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (isolated || (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey)) {
+          event.preventDefault();
+          openMaterial(entry);
+        }
+      });
       formats.appendChild(link);
     });
     if (formats.children.length) {

@@ -1,4 +1,4 @@
-const VERSION = 4;
+const VERSION = 5;
 const CACHE_NAME = `buecher-v${VERSION}`;
 const OFFLINE_PAGE = "./index.html";
 
@@ -21,7 +21,7 @@ self.addEventListener("activate", (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) => key !== CACHE_NAME)
+          .filter((key) => key.startsWith("buecher-v") && key !== CACHE_NAME)
           .map((key) => caches.delete(key))
       )
     )
