@@ -1064,7 +1064,8 @@ body.copy-mode .page-container img {
   margin: 0;
 }
 
-.modal-close {
+.modal-close,
+.material-tool {
   border: 1px solid var(--border);
   background: var(--surface);
   width: 36px;
@@ -1116,12 +1117,43 @@ body.copy-mode .page-container img {
   flex: 0 0 auto;
 }
 
-.material-frame {
-  width: 100%;
+.material-dialog .modal-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.material-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.material-zoom-controls .zoom-label {
+  min-width: 52px;
+  text-align: center;
+}
+
+.material-stage {
+  position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
+  background: white;
+}
+
+.material-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   border: 0;
   background: white;
+  transform-origin: 0 0;
 }
 
 .modal-version {
@@ -1154,6 +1186,38 @@ body:not(.sidebar-open) .sidebar {
 
   #page-input {
     width: 64px;
+  }
+
+  .material-dialog {
+    inset: 0;
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 8px;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .material-dialog .modal-header {
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .material-zoom-controls {
+    gap: 4px;
+  }
+
+  .material-zoom-controls .material-tool,
+  .material-dialog .modal-close {
+    width: 32px;
+    height: 32px;
+  }
+
+  .material-zoom-controls .zoom-label {
+    min-width: 40px;
+    font-size: 0.8rem;
   }
 }
 
@@ -1456,8 +1520,16 @@ body:not(.sidebar-open) .sidebar {
   <dialog id="material-dialog" class="material-dialog" aria-labelledby="material-dialog-title">
     <div class="modal-header">
       <h2 id="material-dialog-title" class="modal-title">Material</h2>
+      <div class="material-zoom-controls" role="group" aria-label="Zoom">
+        <button id="material-zoom-out" class="material-tool" type="button" title="Verkleinern" aria-label="Verkleinern">−</button>
+        <span id="material-zoom-label" class="zoom-label" aria-live="polite">100%</span>
+        <button id="material-zoom-in" class="material-tool" type="button" title="Vergrößern" aria-label="Vergrößern">+</button>
+        <button id="material-fit-width" class="material-tool" type="button" title="Breite einpassen" aria-label="Breite einpassen">↔</button>
+        <button id="material-fit-page" class="material-tool" type="button" title="Seite einpassen" aria-label="Seite einpassen">⤢</button>
+      </div>
       <button id="material-close" class="modal-close" type="button" aria-label="Material schließen">×</button>
     </div>
+    <div id="material-stage" class="material-stage"></div>
   </dialog>
 
 <script>
@@ -1494,9 +1566,12 @@ body:not(.sidebar-open) .sidebar {
     local: "local",
     external: "external",
   };
+  const MATERIAL_ZOOM = { min: 0.1, max: 5, step: 1.1 };
   const state = {
     materialFrame: null,
     materialObjectUrl: "",
+    materialZoomBridge: false,
+    materialOuterZoom: 1,
     materialTrigger: null,
     book: null,
     search: null,
@@ -1737,6 +1812,12 @@ body:not(.sidebar-open) .sidebar {
     els.materialDialog = document.getElementById("material-dialog");
     els.materialTitle = document.getElementById("material-dialog-title");
     els.materialClose = document.getElementById("material-close");
+    els.materialStage = document.getElementById("material-stage");
+    els.materialZoomLabel = document.getElementById("material-zoom-label");
+    els.materialZoomIn = document.getElementById("material-zoom-in");
+    els.materialZoomOut = document.getElementById("material-zoom-out");
+    els.materialFitWidth = document.getElementById("material-fit-width");
+    els.materialFitPage = document.getElementById("material-fit-page");
     els.settingsDialog = document.getElementById("settings-dialog");
     els.settingsBackdrop = document.getElementById("settings-backdrop");
     els.settingsClose = document.getElementById("settings-close");
@@ -1755,6 +1836,22 @@ body:not(.sidebar-open) .sidebar {
         releaseMaterialFrame();
       }
     });
+    els.materialZoomIn.addEventListener("click", () => sendMaterialZoom("in"));
+    els.materialZoomOut.addEventListener("click", () => sendMaterialZoom("out"));
+    els.materialFitWidth.addEventListener("click", () => sendMaterialZoom("fit-width"));
+    els.materialFitPage.addEventListener("click", () => sendMaterialZoom("fit-page"));
+    els.materialDialog.addEventListener(
+      "wheel",
+      (event) => {
+        if (!event.ctrlKey && !event.metaKey) {
+          return;
+        }
+        event.preventDefault();
+        sendMaterialZoom(event.deltaY < 0 ? "in" : "out");
+      },
+      { passive: false }
+    );
+    window.addEventListener("message", handleMaterialMessage);
     els.toggleSidebar.addEventListener("click", toggleSidebar);
     els.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
     if (els.bookTitle) {
@@ -1909,6 +2006,12 @@ body:not(.sidebar-open) .sidebar {
         if (event.key === "Escape") {
           event.preventDefault();
           closeMaterialDialog();
+          return;
+        }
+        const zoomCommand = getMaterialZoomKeyCommand(event);
+        if (zoomCommand) {
+          event.preventDefault();
+          sendMaterialZoom(zoomCommand);
         }
         return;
       }
@@ -8323,6 +8426,350 @@ function fitBookGridTitles() {
       URL.revokeObjectURL(state.materialObjectUrl);
       state.materialObjectUrl = "";
     }
+    state.materialZoomBridge = false;
+    state.materialOuterZoom = 1;
+    updateMaterialZoomLabel(1);
+  }
+
+  function updateMaterialZoomLabel(zoom) {
+    if (els.materialZoomLabel) {
+      els.materialZoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+    }
+  }
+
+  function getMaterialZoomKeyCommand(event) {
+    if (!event.ctrlKey && !event.metaKey) {
+      return "";
+    }
+    if (event.key === "+" || event.key === "=" || event.key === "Add") {
+      return "in";
+    }
+    if (event.key === "-" || event.key === "_" || event.key === "Subtract") {
+      return "out";
+    }
+    if (event.key === "0") {
+      return "reset";
+    }
+    return "";
+  }
+
+  function sendMaterialZoom(command) {
+    const frame = state.materialFrame;
+    if (!frame) {
+      return;
+    }
+    if (state.materialZoomBridge && frame.contentWindow) {
+      frame.contentWindow.postMessage({ materialZoom: command }, "*");
+      return;
+    }
+    let next = 1;
+    if (command === "in") {
+      next = state.materialOuterZoom * MATERIAL_ZOOM.step;
+    } else if (command === "out") {
+      next = state.materialOuterZoom / MATERIAL_ZOOM.step;
+    }
+    setMaterialOuterZoom(next);
+  }
+
+  function setMaterialOuterZoom(value) {
+    const zoom = clamp(value, MATERIAL_ZOOM.min, MATERIAL_ZOOM.max);
+    state.materialOuterZoom = zoom;
+    const frame = state.materialFrame;
+    if (frame) {
+      const size = zoom === 1 ? "" : `${100 / zoom}%`;
+      frame.style.width = size;
+      frame.style.height = size;
+      frame.style.transform = zoom === 1 ? "" : `scale(${zoom})`;
+    }
+    updateMaterialZoomLabel(zoom);
+  }
+
+  function handleMaterialMessage(event) {
+    const frame = state.materialFrame;
+    if (!frame || event.source !== frame.contentWindow) {
+      return;
+    }
+    const data = event.data;
+    if (!data || typeof data !== "object") {
+      return;
+    }
+    if (data.materialEscape === true) {
+      closeMaterialDialog();
+      return;
+    }
+    const level = Number(data.materialZoomLevel);
+    if (!Number.isFinite(level) || level <= 0) {
+      return;
+    }
+    if (!state.materialZoomBridge && state.materialOuterZoom !== 1) {
+      setMaterialOuterZoom(1);
+    }
+    state.materialZoomBridge = true;
+    updateMaterialZoomLabel(clamp(level, MATERIAL_ZOOM.min, MATERIAL_ZOOM.max));
+  }
+
+  function materialZoomBridge(minZoom, maxZoom, zoomStep) {
+    const root = document.documentElement;
+    const useCssZoom = "zoom" in root.style;
+    let zoom = 1;
+    let mode = "auto";
+    let natural = null;
+    let pinch = null;
+    let resizeFrame = 0;
+    const clampZoom = (value) => Math.min(maxZoom, Math.max(minZoom, value));
+    const report = () => parent.postMessage({ materialZoomLevel: zoom }, "*");
+    const clearStyles = () => {
+      root.style.zoom = "";
+      root.style.paddingLeft = "";
+      if (document.body) {
+        document.body.style.transform = "";
+      }
+    };
+    const measure = () => {
+      if (!document.body) {
+        return null;
+      }
+      clearStyles();
+      const range = document.createRange();
+      range.selectNodeContents(document.body);
+      const rect = range.getBoundingClientRect();
+      const left = Math.max(0, rect.left + window.scrollX);
+      const top = Math.max(0, rect.top + window.scrollY);
+      const overflowWidth = root.scrollWidth > root.clientWidth + 1 ? root.scrollWidth : 0;
+      const overflowHeight = root.scrollHeight > root.clientHeight + 1 ? root.scrollHeight : 0;
+      const width = Math.max(overflowWidth, rect.right + window.scrollX + left);
+      const height = Math.max(overflowHeight, rect.bottom + window.scrollY + top);
+      const gutter = Math.max(0, window.innerWidth - root.clientWidth);
+      return width > 0 && height > 0 ? { width, height, gutter } : null;
+    };
+    const apply = (value, anchorX, anchorY) => {
+      const previous = zoom;
+      const contentX = (window.scrollX + anchorX) / previous;
+      const contentY = (window.scrollY + anchorY) / previous;
+      zoom = clampZoom(value);
+      if (useCssZoom) {
+        root.style.zoom = String(zoom);
+        const padding = natural ? Math.max(0, (window.innerWidth / zoom - natural.width) / 2) : 0;
+        root.style.paddingLeft = padding > 0.5 ? `${padding}px` : "";
+      } else if (document.body) {
+        document.body.style.transformOrigin = "0 0";
+        document.body.style.transform = zoom === 1 ? "" : `scale(${zoom})`;
+      }
+      window.scrollTo(contentX * zoom - anchorX, contentY * zoom - anchorY);
+      report();
+    };
+    const fitZoom = (target) => {
+      const scrollX = window.scrollX;
+      const scrollY = window.scrollY;
+      const previous = zoom;
+      natural = measure() || natural;
+      zoom = 1;
+      window.scrollTo(scrollX / previous, scrollY / previous);
+      if (!natural) {
+        return 1;
+      }
+      const fullWidthRatio = window.innerWidth / natural.width;
+      const needsGutter = natural.height * fullWidthRatio > window.innerHeight;
+      const widthRatio = needsGutter ? (window.innerWidth - natural.gutter) / natural.width : fullWidthRatio;
+      const pageRatio = Math.min(window.innerWidth / natural.width, window.innerHeight / natural.height);
+      if (target === "fit-width") {
+        return widthRatio;
+      }
+      if (target === "fit-page") {
+        return pageRatio;
+      }
+      const fitWidth = Math.min(1, widthRatio);
+      const fitPage = Math.min(1, pageRatio);
+      return fitPage >= fitWidth * 0.4 ? fitPage : fitWidth;
+    };
+    const fit = (target) => {
+      mode = target;
+      apply(fitZoom(target), 0, 0);
+    };
+    const zoomBy = (factor, anchorX, anchorY) => {
+      mode = "manual";
+      apply(zoom * factor, anchorX, anchorY);
+    };
+    const center = () => [window.innerWidth / 2, window.innerHeight / 2];
+    window.addEventListener("message", (event) => {
+      if (event.source !== parent || !event.data || typeof event.data !== "object") {
+        return;
+      }
+      const command = event.data.materialZoom;
+      if (command === "in") {
+        zoomBy(zoomStep, ...center());
+      } else if (command === "out") {
+        zoomBy(1 / zoomStep, ...center());
+      } else if (command === "reset") {
+        mode = "manual";
+        apply(1, ...center());
+      } else if (command === "fit-page" || command === "fit-width") {
+        fit(command);
+      }
+    });
+    window.addEventListener("load", () => fit("auto"));
+    window.addEventListener("resize", () => {
+      if (mode === "manual" || resizeFrame) {
+        return;
+      }
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        fit(mode);
+      });
+    });
+    window.addEventListener(
+      "wheel",
+      (event) => {
+        if (!event.ctrlKey && !event.metaKey) {
+          return;
+        }
+        event.preventDefault();
+        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1;
+        const delta = Math.max(-100, Math.min(100, event.deltaY * unit));
+        zoomBy(Math.exp(-delta * 0.0015), event.clientX, event.clientY);
+      },
+      { passive: false }
+    );
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        parent.postMessage({ materialEscape: true }, "*");
+        return;
+      }
+      if (!event.ctrlKey && !event.metaKey) {
+        return;
+      }
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        zoomBy(zoomStep, ...center());
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        zoomBy(1 / zoomStep, ...center());
+      } else if (event.key === "0") {
+        event.preventDefault();
+        mode = "manual";
+        apply(1, ...center());
+      }
+    });
+    const touchDistance = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+    window.addEventListener(
+      "touchstart",
+      (event) => {
+        if (event.touches.length === 2) {
+          pinch = { distance: touchDistance(event.touches) || 1, zoom };
+        }
+      },
+      { passive: true }
+    );
+    window.addEventListener(
+      "touchmove",
+      (event) => {
+        if (!pinch || event.touches.length !== 2) {
+          return;
+        }
+        event.preventDefault();
+        const anchorX = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+        const anchorY = (event.touches[0].clientY + event.touches[1].clientY) / 2;
+        mode = "manual";
+        apply((pinch.zoom * touchDistance(event.touches)) / pinch.distance, anchorX, anchorY);
+      },
+      { passive: false }
+    );
+    window.addEventListener("touchend", (event) => {
+      if (event.touches.length < 2) {
+        pinch = null;
+      }
+    });
+    root.style.touchAction = "pan-x pan-y";
+    report();
+  }
+
+  function getMaterialZoomScript() {
+    const args = [MATERIAL_ZOOM.min, MATERIAL_ZOOM.max, MATERIAL_ZOOM.step].join(", ");
+    return `<script>(${materialZoomBridge})(${args});<\/script>`;
+  }
+
+  function getMaterialDocumentKind(entry, url, file) {
+    const types = [file && file.type, entry.extension, entry.mimeType].map((value) => String(value || "").toLowerCase().split(";")[0].trim());
+    if (types.some((type) => ["image/svg+xml", "svg"].includes(type))) {
+      return "svg";
+    }
+    if (types.some((type) => ["text/html", "application/xhtml+xml", "html", "htm", "xhtml"].includes(type))) {
+      return "html";
+    }
+    const paths = [file && file.name, entry.file, entry.path, entry.url, url].map((value) => String(value || ""));
+    if (paths.some((path) => /\.svg(?:[?#]|$)/i.test(path))) {
+      return "svg";
+    }
+    if (paths.some((path) => /\.(?:html?|xhtml)(?:[?#]|$)/i.test(path))) {
+      return "html";
+    }
+    return "";
+  }
+
+  function decodeMaterialBytes(buffer) {
+    const bytes = new Uint8Array(buffer);
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+      return new TextDecoder("utf-8").decode(bytes);
+    }
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+      return new TextDecoder("utf-16le").decode(bytes);
+    }
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+      return new TextDecoder("utf-16be").decode(bytes);
+    }
+    const head = new TextDecoder("windows-1252").decode(bytes.subarray(0, 2048));
+    const declared =
+      /<meta[^>]+charset\s*=\s*["']?\s*([\w.:-]+)/i.exec(head) || /<\?xml[^>]+encoding\s*=\s*["']([\w.:-]+)/i.exec(head);
+    if (declared) {
+      const label = /^utf-?16/i.test(declared[1]) ? "utf-8" : declared[1];
+      try {
+        return new TextDecoder(label).decode(bytes);
+      } catch (error) {
+        return new TextDecoder("utf-8").decode(bytes);
+      }
+    }
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (error) {
+      return new TextDecoder("windows-1252").decode(bytes);
+    }
+  }
+
+  function injectIntoMaterialHead(html, markup) {
+    const anchor = /<head\b[^>]*>/i.exec(html) || /<html\b[^>]*>/i.exec(html) || /^\s*(?:<\?xml[^>]*>\s*)?(?:<!doctype[^>]*>)?/i.exec(html);
+    const at = anchor ? anchor.index + anchor[0].length : 0;
+    return html.slice(0, at) + markup + html.slice(at);
+  }
+
+  async function readMaterialBytes(url, file) {
+    if (file) {
+      return file.arrayBuffer();
+    }
+    const target = new URL(url, window.location.href);
+    if (!["http:", "https:"].includes(target.protocol) || target.origin !== window.location.origin) {
+      return null;
+    }
+    const response = await fetch(target.href);
+    return response.ok ? response.arrayBuffer() : null;
+  }
+
+  async function buildMaterialDocument(entry, url, file) {
+    const kind = getMaterialDocumentKind(entry, url, file);
+    if (!kind) {
+      return null;
+    }
+    const buffer = await readMaterialBytes(url, file);
+    if (!buffer) {
+      return null;
+    }
+    const text = decodeMaterialBytes(buffer);
+    const script = getMaterialZoomScript();
+    if (kind === "svg") {
+      const source = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`;
+      return `<!doctype html><html><head><meta charset="utf-8">${script}<style>html,body{margin:0}img{display:block;max-width:none}</style></head><body><img alt="" src="${escapeHtml(source)}"></body></html>`;
+    }
+    const base = url.startsWith("blob:") ? "" : `<base href="${escapeHtml(new URL(url, window.location.href).href)}">`;
+    return injectIntoMaterialHead(text, base + script);
   }
 
   function closeMaterialDialog() {
@@ -8346,6 +8793,11 @@ function fitBookGridTitles() {
       window.open(url, "_blank", "noopener");
       return;
     }
+    const isBlob = url.startsWith("blob:");
+    const file = getMaterialFile(entry, url);
+    if (isBlob && !file) {
+      return;
+    }
     closeMaterialDialog();
     state.materialTrigger = document.activeElement;
     const title = String(entry.name || entry.label || "Material");
@@ -8355,20 +8807,25 @@ function fitBookGridTitles() {
     frame.title = title;
     frame.setAttribute("sandbox", "allow-scripts");
     frame.referrerPolicy = "no-referrer";
-    let source = url;
-    if (url.startsWith("blob:")) {
-      const file = getMaterialFile(entry, url);
-      if (!file) {
-        return;
-      }
-      state.materialObjectUrl = URL.createObjectURL(file);
-      source = state.materialObjectUrl + (new URL(url).hash || "");
-    }
-    frame.src = source;
     state.materialFrame = frame;
-    els.materialDialog.appendChild(frame);
+    els.materialStage.appendChild(frame);
     els.materialDialog.showModal();
     els.materialClose.focus();
+    const hash = new URL(url, window.location.href).hash || "";
+    buildMaterialDocument(entry, url, file)
+      .catch(() => null)
+      .then((html) => {
+        if (state.materialFrame !== frame) {
+          return;
+        }
+        const content = html !== null ? new Blob([html], { type: "text/html;charset=utf-8" }) : isBlob ? file : null;
+        if (!content) {
+          frame.src = url;
+          return;
+        }
+        state.materialObjectUrl = URL.createObjectURL(content);
+        frame.src = state.materialObjectUrl + hash;
+      });
   }
 
   function shouldPreferDirectMaterialPath(path) {
